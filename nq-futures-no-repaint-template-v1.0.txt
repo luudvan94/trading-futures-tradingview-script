@@ -1,0 +1,306 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Template adapted for NQ (Nasdaq-100 E-mini Futures)
+// Based on ES no-repaint strategy with NQ-specific parameter adjustments
+
+//@version=5
+strategy("NQ - Futures 1M No Repaint Template v1.0",
+    overlay=true,
+    pyramiding=1,
+    default_qty_type=strategy.fixed,
+    default_qty_value=1,
+    initial_capital=10000,
+    commission_type=strategy.commission.cash_per_contract,
+    commission_value=2.50)  // Typical NQ commission
+
+// ============================================================================
+// NON-REPAINTING RULES (CRITICAL - DO NOT MODIFY THESE PATTERNS)
+// ============================================================================
+// 1. All entry conditions use barstate.isconfirmed
+// 2. All security() calls use lookahead=barmerge.lookahead_off
+// 3. Pivot calculations use equal left/right bars
+// 4. Reference closed bars [1] when possible
+// ============================================================================
+
+// ============================================================================
+// RISK PARAMETERS - NQ SPECIFIC (Higher volatility than ES)
+// ============================================================================
+// NQ moves ~2-3x more than ES, so wider stops needed
+stopPerLong = input.float(0.12, title='Stop Loss Long %', minval=0.01, maxval=1.0) / 100
+takePerLong = input.float(0.08, title='Take Profit Long %', minval=0.01, maxval=1.0) / 100
+
+stopPerShort = input.float(0.12, title='Stop Loss Short %', minval=0.01, maxval=1.0) / 100
+takePerShort = input.float(0.06, title='Take Profit Short %', minval=0.01, maxval=1.0) / 100
+
+// ============================================================================
+// INDICATOR PARAMETERS - NQ OPTIMIZED
+// ============================================================================
+// Trend Detection
+wmaFastLen = input.int(13, "WMA Fast Length", minval=1)
+wmaMidLen = input.int(48, "WMA Mid Length", minval=1)
+wmaSlowLen = input.int(200, "WMA Slow Length", minval=1)
+
+// Momentum
+rsiLen = input.int(11, "RSI Length", minval=1)
+rsiMaLen = input.int(24, "RSI MA Length", minval=1)
+cciLen = input.int(28, "CCI Length", minval=1)
+
+// MACD
+macdFast = input.int(5, "MACD Fast", minval=1)
+macdSlow = input.int(13, "MACD Slow", minval=1)
+macdSignal = input.int(8, "MACD Signal", minval=1)
+
+// Pivot/Support-Resistance
+pivotLookback = input.int(5, "Pivot Lookback", minval=1)
+
+// ============================================================================
+// TIME FILTER - NQ Trading Hours (Same as ES: US Market Hours)
+// ============================================================================
+// Best trading hours: 6:30 AM - 12:30 PM Pacific (9:30 AM - 3:30 PM Eastern)
+// Avoid overnight session and lunch hour low volume
+hr = hour(time_close, 'UTC-8')
+mi = minute(time_close, 'UTC-8')
+lockTime = hr >= 13 or (hr == 12 and mi > 30) or hr < 6 or (hr == 6 and mi < 30)
+tradingHours = not lockTime
+
+// ============================================================================
+// PRICE DATA (NON-REPAINTING)
+// ============================================================================
+// Use simple moving average of last 10 opens for smoothing
+avgPrice = (open[9] + open[8] + open[7] + open[6] + open[5] + open[4] + open[3] + open[2] + open[1] + open) / 10
+
+// Higher timeframe data - NON-REPAINTING with lookahead_off
+open5m = request.security(syminfo.tickerid, "5", open, lookahead=barmerge.lookahead_off)
+open10m = request.security(syminfo.tickerid, "10", open, lookahead=barmerge.lookahead_off)
+
+// ============================================================================
+// TREND INDICATORS
+// ============================================================================
+// Weighted Moving Averages
+wmaFast = ta.wma(close, wmaFastLen)
+wmaMid = ta.wma(close, wmaMidLen)
+wmaSlow = ta.wma(close, wmaSlowLen)
+
+// Plot trend lines
+plot(wmaFast, "WMA Fast", color=color.new(color.yellow, 0), linewidth=1)
+plot(wmaMid, "WMA Mid", color=color.new(color.blue, 0), linewidth=1)
+plot(wmaSlow, "WMA Slow", color=color.new(color.white, 50), linewidth=2)
+
+// Trend states
+uptrend = wmaFast > wmaMid and wmaMid > wmaSlow
+downtrend = wmaFast < wmaMid and wmaMid < wmaSlow
+
+// WMA crossovers - NON-REPAINTING with barstate.isconfirmed
+crossUpFastMid = ta.crossover(wmaFast, wmaMid) and barstate.isconfirmed
+crossDownFastMid = ta.crossunder(wmaFast, wmaMid) and barstate.isconfirmed
+
+// ============================================================================
+// MOMENTUM INDICATORS
+// ============================================================================
+// RSI
+rsi = ta.rsi(close, rsiLen)
+rsiMa = ta.sma(rsi, rsiMaLen)
+rsiRising = rsi > rsiMa
+rsiFalling = rsi < rsiMa
+
+// CCI for SuperTrend calculation
+cci = ta.cci(avgPrice, cciLen)
+
+// MACD
+[macdLine, signalLine, histLine] = ta.macd(avgPrice, macdFast, macdSlow, macdSignal)
+macdRising = histLine > histLine[1]
+macdFalling = histLine < histLine[1]
+macdAboveZero = histLine > 0
+macdBelowZero = histLine < 0
+
+// Plot MACD in separate pane
+plot(macdLine, "MACD", color=color.white, display=display.pane)
+plot(signalLine, "Signal", color=color.yellow, display=display.pane)
+
+// ============================================================================
+// SUPPORT/RESISTANCE - NON-REPAINTING
+// ============================================================================
+// Pivot High/Low with EQUAL left/right bars (critical for non-repainting)
+pivotHigh = ta.pivothigh(high, pivotLookback, pivotLookback)
+pivotLow = ta.pivotlow(low, pivotLookback, pivotLookback)
+
+// Track running pivot levels
+var float resistance = na
+var float support = na
+
+if not na(pivotHigh)
+    resistance := pivotHigh
+if not na(pivotLow)
+    support := pivotLow
+
+// Plot S/R levels
+plot(resistance, "Resistance", color=color.red, style=plot.style_circles, linewidth=2, offset=-pivotLookback)
+plot(support, "Support", color=color.green, style=plot.style_circles, linewidth=2, offset=-pivotLookback)
+
+// ============================================================================
+// SUPERTREND CALCULATION (NON-REPAINTING)
+// ============================================================================
+atrPeriod = 3
+atrMult = 3.0
+atr = ta.atr(atrPeriod)
+
+upperBand = hl2 - atrMult * atr
+lowerBand = hl2 + atrMult * atr
+
+var float trendUp = na
+var float trendDown = na
+var int trend = 1
+
+trendUp := cci[1] > 0 ? math.max(upperBand, nz(trendUp[1])) : upperBand
+trendDown := cci[1] < 0 ? math.min(lowerBand, nz(trendDown[1])) : lowerBand
+trend := cci > 0 ? 1 : cci < 0 ? -1 : nz(trend[1], 1)
+
+supertrend = trend == 1 ? trendUp : trendDown
+stBullish = avgPrice >= supertrend
+stBearish = avgPrice < supertrend
+
+// ============================================================================
+// BAR COLOR ANALYSIS (Heikin-Ashi style)
+// ============================================================================
+haClose = (open + high + low + close) / 4
+haOpen = (open[1] + close[1]) / 2
+bullBar = haClose > haOpen
+bearBar = haClose < haOpen
+
+// Consecutive bars
+bullBars2 = bullBar and bullBar[1]
+bearBars2 = bearBar and bearBar[1]
+bullBars3 = bullBar and bullBar[1] and bullBar[2]
+bearBars3 = bearBar and bearBar[1] and bearBar[2]
+
+// ============================================================================
+// ENTRY CONDITIONS - ALL NON-REPAINTING
+// ============================================================================
+// Long Condition 1: WMA crossover in uptrend with momentum confirmation
+longCond1 = crossUpFastMid and uptrend and macdRising and rsiRising
+
+// Long Condition 2: Price breaks above resistance with trend support
+longCond2 = ta.crossover(close[1], resistance) and uptrend and stBullish and barstate.isconfirmed
+
+// Long Condition 3: Reversal from support with momentum
+longCond3 = close[1] > support and close[2] < support and macdRising and bullBars2 and barstate.isconfirmed
+
+// Long Condition 4: MACD histogram turning positive in uptrend
+longCond4 = macdAboveZero and histLine[1] < 0 and uptrend and stBullish and barstate.isconfirmed
+
+// Short Condition 1: WMA crossunder in downtrend with momentum confirmation
+shortCond1 = crossDownFastMid and downtrend and macdFalling and rsiFalling
+
+// Short Condition 2: Price breaks below support with trend support
+shortCond2 = ta.crossunder(close[1], support) and downtrend and stBearish and barstate.isconfirmed
+
+// Short Condition 3: Rejection from resistance with momentum
+shortCond3 = close[1] < resistance and close[2] > resistance and macdFalling and bearBars2 and barstate.isconfirmed
+
+// Short Condition 4: MACD histogram turning negative in downtrend
+shortCond4 = macdBelowZero and histLine[1] > 0 and downtrend and stBearish and barstate.isconfirmed
+
+// Combine conditions
+longCondition = (longCond1 or longCond2 or longCond3 or longCond4)
+shortCondition = (shortCond1 or shortCond2 or shortCond3 or shortCond4)
+
+// ============================================================================
+// ENTRY FILTERS (Additional safety)
+// ============================================================================
+// Filter: Don't enter against strong momentum
+if longCondition and (macdFalling or rsiFalling)
+    longCondition := false
+
+if shortCondition and (macdRising or rsiRising)
+    shortCondition := false
+
+// Filter: Require bar confirmation
+if longCondition and not bullBar
+    longCondition := false
+
+if shortCondition and not bearBar
+    shortCondition := false
+
+// ============================================================================
+// EXIT CONDITIONS
+// ============================================================================
+// Long exits
+closeLong1 = ta.crossunder(wmaFast, wmaMid) and barstate.isconfirmed
+closeLong2 = ta.crossunder(close[1], support) and barstate.isconfirmed
+closeLong3 = bearBars3 and macdFalling
+
+// Short exits
+closeShort1 = ta.crossover(wmaFast, wmaMid) and barstate.isconfirmed
+closeShort2 = ta.crossover(close[1], resistance) and barstate.isconfirmed
+closeShort3 = bullBars3 and macdRising
+
+closeLongCondition = closeLong1 or closeLong2 or closeLong3
+closeShortCondition = closeShort1 or closeShort2 or closeShort3
+
+// ============================================================================
+// POSITION MANAGEMENT
+// ============================================================================
+var float entryPrice = na
+
+// Calculate stop/take levels
+longStop = strategy.position_avg_price * (1 - stopPerLong)
+longTake = strategy.position_avg_price * (1 + takePerLong)
+shortStop = strategy.position_avg_price * (1 + stopPerShort)
+shortTake = strategy.position_avg_price * (1 - takePerShort)
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+// Long entry
+if longCondition and tradingHours
+    strategy.entry("Long", strategy.long)
+    entryPrice := close
+
+// Short entry
+if shortCondition and tradingHours
+    strategy.entry("Short", strategy.short)
+    entryPrice := close
+
+// Conditional exits
+if strategy.position_size > 0 and closeLongCondition
+    strategy.close("Long")
+
+if strategy.position_size < 0 and closeShortCondition
+    strategy.close("Short")
+
+// Stop loss / Take profit exits
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long", limit=longTake, stop=longStop)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short", limit=shortTake, stop=shortStop)
+
+// ============================================================================
+// VISUAL SIGNALS
+// ============================================================================
+// Plot entry signals
+plotshape(longCondition and tradingHours, title="Long Signal",
+    style=shape.triangleup, location=location.belowbar,
+    color=color.green, size=size.small, text="LONG", textcolor=color.green)
+
+plotshape(shortCondition and tradingHours, title="Short Signal",
+    style=shape.triangledown, location=location.abovebar,
+    color=color.red, size=size.small, text="SHORT", textcolor=color.red)
+
+// Background color for trend
+bgcolor(uptrend ? color.new(color.green, 95) : downtrend ? color.new(color.red, 95) : na)
+
+// ============================================================================
+// ALERTS (For webhook automation)
+// ============================================================================
+alertcondition(longCondition and tradingHours, title="NQ Long Entry", message="NQ LONG: {{ticker}} at {{close}}")
+alertcondition(shortCondition and tradingHours, title="NQ Short Entry", message="NQ SHORT: {{ticker}} at {{close}}")
+alertcondition(closeLongCondition, title="NQ Close Long", message="NQ CLOSE LONG: {{ticker}} at {{close}}")
+alertcondition(closeShortCondition, title="NQ Close Short", message="NQ CLOSE SHORT: {{ticker}} at {{close}}")
+
+// ============================================================================
+// DEBUG INFO (Comment out in production)
+// ============================================================================
+// Uncomment to see indicator values:
+// label.new(bar_index, high, str.format("RSI: {0}\nMACD: {1}\nTrend: {2}",
+//     math.round(rsi, 2), math.round(histLine, 4), trend),
+//     style=label.style_label_down, size=size.small)
